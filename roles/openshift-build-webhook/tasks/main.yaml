@@ -1,0 +1,17 @@
+---
+- name: setup kube config
+  shell: oc --namespace "{{ zuul_resources['namespace'].namespace }}" \
+      login "{{ zuul_resources['namespace'].host }}" \
+      --insecure-skip-tls-verify="{{ zuul_resources['namespace'].skiptls }}" \
+      --token $(echo "{{ zuul_resources['namespace'].token }}" | base64 -d)
+
+- name: trigger OpenShift Build
+  uri:
+    method: POST
+    url: "{{ webhook_url }}/{{ webhook_secret.key }}/generic"
+    body_format: json
+    content: ""
+    validate_certs: no
+    follow_redirects: all
+    headers:
+      Content-Type: "application/json"

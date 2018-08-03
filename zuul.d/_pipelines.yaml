@@ -3,8 +3,8 @@
 - pipeline:
     name: check
     description: |
-      Newly uploaded patchsets enter this pipeline to receive an
-      initial +/-1 Verified vote.
+      Newly opened Pull Requests enter this pipeline to receive an
+      initial +/-1 Status.
     manager: independent
     trigger:
       github.com:
