@@ -2,20 +2,12 @@
 - hosts: all
 
   vars:
-    cluster: "paas.psi.redhat.com"
+    - thoth_ops_version: "v0.10.0"
+    - cluster: "paas.psi.redhat.com"
+    - image_stream_tag: "test"
 
   tasks:
-    - name: "Trigger OpenShift Build"
-      uri:
-        method: POST
-        url: "{{ webhook_url }}/webhooks/{{ webhook_secret.key }}/generic"
-        validate_certs: no
-        follow_redirects: all
-        headers:
-          Content-Type: "application/json"
-      when: webhook_url is defined
-
-    - name: "Trigger OpenShift Build"
+   - name: "Trigger OpenShift Build"
       uri:
         method: POST
         url: "https://{{ cluster }}/oapi/v1/namespaces/{{ namespace }}/buildconfigs/{{ buildConfigName }}/webhooks/{{ webhook_secret.key }}/generic"
@@ -23,17 +15,127 @@
         follow_redirects: all
         headers:
           Content-Type: "application/json"
-      when: 
+      register: response_content
+      when:
         - cluster is defined
         - namespace is defined
         - buildConfigName is defined
 
     - name: "Show error message if no build is trigger"
       debug:
-        msg: 
-          - "No OpenShift Build is triggered, please provide either of the following parameter set" 
+        msg:
+          - "No OpenShift Build is triggered, please provide either of the following parameter set"
           - "(webhook_url, webhook_secret)"
           - "(cluster, namespace, buildConfigName, webhook_secret)"
       when:
           - webhook_url is not defined
           - (namespace is not defined) or (buildConfigName is not defined)
+
+    - name: Show response content 
+      debug:
+        var: response_content
+
+    - name: Get image name tag
+      debug:
+        msg: "{{ response_content.json.spec.output.to.name }}"
+      register: image_name_tag
+    
+    - name: Get image name
+      debug:
+        msg: "{{ response_content.json.metadata.labels.buildconfig }}"
+      register: image_name
+
+    - name: wait until build finish
+      command: oc describe build/{{ response_content.json.metadata.name }}
+      register: curr_status
+      retries: 60 
+      delay: 10 
+      until:
+        - curr_status.stdout_lines[12] is search ("Complete") 
+
+    - name: "make sure we use thoth-infra-stage for ThothOps"
+      command: oc project thoth-infra-stage
+
+    - name: "make sure thoth-ops is allowed to pull the ImageStreamTags from thoth-test-core"
+      command: oc policy add-role-to-user
+        system:image-puller system:serviceaccount:thoth-infra-stage:default \
+        --namespace=thoth-test-core
+
+    - name: "delete thoth-ops Pod"
+      k8s_raw:
+        state: absent
+        definition:
+          kind: Pod
+          metadata:
+            namespace: thoth-infra-stage
+            name: thoth-ops
+
+    - pause:
+        seconds: 12
+
+    - name: "create thoth-ops Pod"
+      k8s_raw:
+        state: present
+        definition:
+          kind: Pod
+          apiVersion: v1
+          metadata:
+            namespace: thoth-infra-stage
+            name: thoth-ops
+            labels:
+              playbook: push_test_to_quayio
+          spec:
+            servcieAccountName: "thoth-ops"
+            containers:
+              - image: "thoth-ops:{{ thoth_ops_version }}"
+                imagePullPolicy: IfNotPresent
+                name: thoth-ops
+                resources: {}
+                stdin: true
+                stdinOnce: true
+                tty: true
+            restartPolicy: Never
+            resources:
+              limits:
+                cpu: 500m
+                memory: 600Mi
+              requests:
+                cpu: 200m
+                memory: 200Mi
+      ignore_errors: true
+
+    - name: "wait for thoth-ops pod to be ready"
+      k8s_facts:
+        kind: Pod
+        name: thoth-ops
+        namespace: thoth-infra-stage
+        field_selectors:
+          - status.phase = running
+      register: thoth_ops_pod
+      retries: 10
+      delay: 5
+      until:
+        - thoth_ops_pod.resources[0]['status']['phase'] == "Running"
+
+    - name: "push test ImageStreamTags"
+      command: oc rsh thoth-ops skopeo copy \
+        --dest-creds=thoth-station+thoth_pusher:{{ quay_secret.key }} \
+        --src-tls-verify=false \
+        --src-creds=serviceaccount:{{ thoth_registry_secret.key }} \
+        docker://docker-registry.default.svc:5000/thoth-test-core/{{ image_name_tag.msg }} \
+        docker://quay.io/thoth-station/{{ image_name.msg }}:{{ image_stream_tag }}
+
+    - name: "delete thoth-ops Pod"
+      k8s_raw:
+        state: absent
+        definition:
+          kind: Pod
+          apiVersion: v1
+          metadata:
+            namespace: thoth-infra-stage
+            name: thoth-ops
+
+    - name: "import tag to infra project"
+      shell: oc tag --namespace "thoth-infra-stage" \
+        --source=docker "quay.io/thoth-station/{{ image_name.msg }}:{{ image_stream_tag }}" \
+        "{{ image_name }}:latest"
